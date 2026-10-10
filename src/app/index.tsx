@@ -6,6 +6,7 @@ import { Alert, FlatList, Pressable, StyleSheet, View } from 'react-native';
 import { ExpenseFormSheet } from '@/components/expense-form-sheet';
 import { AppText, Button, IconButton, Screen } from '@/components/ui/primitives';
 import { dotColor } from '@/constants/theme';
+import { useBackupReminder } from '@/features/backup/useBackupReminder';
 import { categoriesQuery, deleteExpense, expensesByDateQuery, type ExpenseRow } from '@/features/expenses/queries';
 import { useTheme } from '@/hooks/use-theme';
 import { pickDate, shiftDate, today } from '@/lib/dates';
@@ -17,6 +18,7 @@ export default function ExpensesScreen() {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<ExpenseRow | null>(null);
   const [formKey, setFormKey] = useState(0);
+  useBackupReminder();
 
   const { data: rows } = useLiveQuery(expensesByDateQuery(date), [date]);
   const { data: categoryList } = useLiveQuery(categoriesQuery());

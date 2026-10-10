@@ -5,6 +5,7 @@ import { asc } from 'drizzle-orm';
 
 import { db } from '@/db/client';
 import { categories, expenses } from '@/db/schema';
+import { markExported } from '@/features/backup/backupStatus';
 
 /**
  * Backup file format. The one-off Supabase dump script (scripts/dump-supabase.ts)
@@ -28,6 +29,8 @@ export type BackupFile = {
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const INSERT_CHUNK = 500;
+// Kept in the document directory (not cache) so Android does not clear it.
+const SNAPSHOT_FILENAME = 'before-last-import.json';
 
 function timestampForFilename() {
   const d = new Date();
@@ -35,8 +38,8 @@ function timestampForFilename() {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
 
-function writeCacheFile(name: string, content: string) {
-  const file = new File(Paths.cache, name);
+function writeFile(dir: typeof Paths.cache, name: string, content: string) {
+  const file = new File(dir, name);
   if (file.exists) {
     file.delete();
   }
@@ -68,8 +71,10 @@ export async function buildBackup(): Promise<BackupFile> {
 
 export async function exportJson() {
   const backup = await buildBackup();
-  const file = writeCacheFile(`expenses-backup-${timestampForFilename()}.json`, JSON.stringify(backup));
+  const file = writeFile(Paths.cache, `expenses-backup-${timestampForFilename()}.json`, JSON.stringify(backup));
   await Sharing.shareAsync(file.uri, { mimeType: 'application/json', dialogTitle: 'Save backup' });
+  // The share sheet does not report whether the file was actually saved, so count any completed share.
+  markExported();
   return backup.expenses.length;
 }
 
@@ -102,7 +107,7 @@ export async function exportCsv() {
   });
 
   // BOM so Excel opens Thai text correctly.
-  const file = writeCacheFile(`expenses-${timestampForFilename()}.csv`, '﻿' + lines.join('\n'));
+  const file = writeFile(Paths.cache, `expenses-${timestampForFilename()}.csv`, '﻿' + lines.join('\n'));
   await Sharing.shareAsync(file.uri, { mimeType: 'text/csv', dialogTitle: 'Export CSV' });
   return backup.expenses.length;
 }
@@ -142,7 +147,9 @@ export function parseBackup(text: string): BackupFile {
 export async function pickBackupFile(): Promise<BackupFile | null> {
   const result = await DocumentPicker.getDocumentAsync({
     type: ['application/json', 'text/plain', '*/*'],
-    copyToCacheDirectory: true,
+    // Read the content:// URI directly. The picker's cache copy lives outside Expo Go's
+    // scoped directory, so expo-file-system rejects reading it ("missing READ permission").
+    copyToCacheDirectory: false,
   });
   if (result.canceled) {
     return null;
@@ -175,4 +182,26 @@ export function restoreBackup(backup: BackupFile) {
       tx.insert(expenses).values(chunk).run();
     }
   });
+}
+
+/**
+ * Saves the current data to a file on the phone before an import replaces it,
+ * so a wrong import can be undone. Skipped when there is nothing to save, so an
+ * import into an empty app does not overwrite an older, useful snapshot.
+ */
+export async function savePreImportSnapshot() {
+  const backup = await buildBackup();
+  if (backup.expenses.length === 0 && backup.categories.length === 0) {
+    return;
+  }
+  writeFile(Paths.document, SNAPSHOT_FILENAME, JSON.stringify(backup));
+}
+
+/** The data saved before the last import, or null if there is none. */
+export function readPreImportSnapshot(): BackupFile | null {
+  const file = new File(Paths.document, SNAPSHOT_FILENAME);
+  if (!file.exists) {
+    return null;
+  }
+  return parseBackup(file.textSync());
 }

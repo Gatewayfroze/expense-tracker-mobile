@@ -1,6 +1,8 @@
+import dayjs from 'dayjs';
 import { useLiveQuery } from 'drizzle-orm/expo-sqlite';
 import { sql } from 'drizzle-orm';
-import { useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { AppText, Button, Card, Screen, TextField } from '@/components/ui/primitives';
@@ -8,9 +10,28 @@ import { Sheet } from '@/components/ui/sheet';
 import { dotColor } from '@/constants/theme';
 import { db } from '@/db/client';
 import { expenses, type Category } from '@/db/schema';
-import { exportCsv, exportJson, pickBackupFile, restoreBackup } from '@/features/backup/exportImport';
+import { daysSince, getLastExportAt, isBackupOverdue } from '@/features/backup/backupStatus';
+import {
+  exportCsv,
+  exportJson,
+  pickBackupFile,
+  readPreImportSnapshot,
+  restoreBackup,
+  savePreImportSnapshot,
+  type BackupFile,
+} from '@/features/backup/exportImport';
 import { addCategory, categoriesQuery, deleteCategoryIfUnused, renameCategory } from '@/features/expenses/queries';
 import { useTheme } from '@/hooks/use-theme';
+
+function readBackupInfo(): { lastExportAt: Date | null; snapshot: BackupFile | null } {
+  let snapshot: BackupFile | null = null;
+  try {
+    snapshot = readPreImportSnapshot();
+  } catch {
+    // An unreadable snapshot just hides the "Undo last import" button.
+  }
+  return { lastExportAt: getLastExportAt(), snapshot };
+}
 
 export default function SettingsScreen() {
   const theme = useTheme();
@@ -18,6 +39,18 @@ export default function SettingsScreen() {
   const { data: stats } = useLiveQuery(db.select({ count: sql<number>`count(*)` }).from(expenses));
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<Category | 'new' | null>(null);
+  const [{ lastExportAt, snapshot }, setBackupInfo] = useState(readBackupInfo);
+
+  function refreshBackupInfo() {
+    setBackupInfo(readBackupInfo());
+  }
+
+  // Re-read on focus: an export can also happen from the reminder on the Expenses tab.
+  useFocusEffect(
+    useCallback(() => {
+      setBackupInfo(readBackupInfo());
+    }, []),
+  );
 
   async function run(label: string, task: () => Promise<void>) {
     setBusy(label);
@@ -44,12 +77,18 @@ export default function SettingsScreen() {
           {
             text: 'Replace',
             style: 'destructive',
-            onPress: () => {
+            onPress: async () => {
               try {
+                // If saving the current data fails, stop: never replace data we could not keep a copy of.
+                await savePreImportSnapshot();
                 restoreBackup(backup);
-                Alert.alert('Import complete', `${backup.expenses.length} expenses imported.`);
+                refreshBackupInfo();
+                Alert.alert(
+                  'Import complete',
+                  `${backup.expenses.length} expenses imported. Your previous data was saved — use "Undo last import" in Settings if this was the wrong file.`,
+                );
               } catch (e) {
-                Alert.alert('Import failed', e instanceof Error ? e.message : String(e));
+                Alert.alert('Import failed', `Nothing was changed. ${e instanceof Error ? e.message : String(e)}`);
               }
             },
           },
@@ -57,6 +96,34 @@ export default function SettingsScreen() {
       );
     });
   }
+
+  function undoImport() {
+    if (!snapshot) {
+      return;
+    }
+    Alert.alert(
+      'Undo last import?',
+      `This will replace the data on this phone with the ${snapshot.expenses.length} expenses that were here before the import (saved ${dayjs(snapshot.exportedAt).format('MMM D, YYYY HH:mm')}).`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Undo import',
+          style: 'destructive',
+          onPress: () => {
+            try {
+              restoreBackup(snapshot);
+              Alert.alert('Restored', `${snapshot.expenses.length} expenses restored.`);
+            } catch (e) {
+              Alert.alert('Restore failed', e instanceof Error ? e.message : String(e));
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  const exportDays = daysSince(lastExportAt);
+  const overdue = (stats[0]?.count ?? 0) > 0 && isBackupOverdue(lastExportAt);
 
   return (
     <Screen>
@@ -69,12 +136,18 @@ export default function SettingsScreen() {
             Data lives only on this phone ({stats[0]?.count ?? 0} expenses). Export regularly and save the file to Google
             Drive or LINE so you can restore it on a new phone.
           </AppText>
+          <AppText variant="caption" tone={overdue ? 'danger' : 'success'} style={styles.lastBackup}>
+            {lastExportAt
+              ? `Last backup: ${dayjs(lastExportAt).format('MMM D, YYYY')} (${exportDays === 0 ? 'today' : `${exportDays} ${exportDays === 1 ? 'day' : 'days'} ago`})`
+              : 'Never backed up'}
+          </AppText>
           <Button
             label="Export backup (JSON)"
             loading={busy === 'json'}
             onPress={() =>
               run('json', async () => {
                 await exportJson();
+                refreshBackupInfo();
               })
             }
           />
@@ -89,6 +162,14 @@ export default function SettingsScreen() {
             }
           />
           <Button label="Import / restore backup" variant="outline" loading={busy === 'import'} onPress={importBackup} />
+          {snapshot ? (
+            <>
+              <Button label="Undo last import" variant="ghost" onPress={undoImport} />
+              <AppText variant="caption" tone="secondary">
+                Brings back the {snapshot.expenses.length} expenses that were on this phone before the last import.
+              </AppText>
+            </>
+          ) : null}
         </Card>
 
         <Card style={styles.gap}>
@@ -179,6 +260,7 @@ function CategorySheet({ category, onClose }: { category: Category | null; onClo
 const styles = StyleSheet.create({
   content: { padding: 16, gap: 16, paddingBottom: 32 },
   gap: { gap: 10 },
+  lastBackup: { fontWeight: '600' },
   rowCenter: { flexDirection: 'row', alignItems: 'center' },
   categoryRow: {
     flexDirection: 'row',
