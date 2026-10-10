@@ -42,6 +42,9 @@ export default function SummaryScreen() {
   const { totals, tabs } = buildSummary(rows, periodKeys, labelOf, kind === 'year');
   const grandTotal = totals.reduce((sum, t) => sum + t.totalAmount, 0);
   const activeTab = tabs.find((t) => t.key === tab) ?? tabs[0];
+  // Tapping a bar selects that period's tab; tapping it again goes back to "All".
+  const selectedIndex = totals.findIndex((t) => t.key === activeTab.key);
+  const selectedTotal = selectedIndex >= 0 ? totals[selectedIndex] : null;
 
   function switchKind(next: PeriodKind) {
     setKind(next);
@@ -84,13 +87,20 @@ export default function SummaryScreen() {
                 </AppText>
                 <View style={styles.alignEnd}>
                   <AppText variant="caption" tone="secondary">
-                    Total
+                    {selectedTotal ? `Total ${selectedTotal.label}` : 'Total'}
                   </AppText>
-                  <AppText variant="amount">{formatSatang(grandTotal)}</AppText>
+                  <AppText variant="amount">{formatSatang(selectedTotal ? selectedTotal.totalAmount : grandTotal)}</AppText>
+                  {selectedTotal && selectedTotal.totalDiscount > 0 ? (
+                    <AppText variant="caption" tone="success">
+                      -{formatSatang(selectedTotal.totalDiscount)} discount
+                    </AppText>
+                  ) : null}
                 </View>
               </View>
               <StackedBarChart
                 data={totals.map((t) => ({ label: t.label, amount: t.totalAmount, discount: t.totalDiscount }))}
+                selectedIndex={selectedIndex}
+                onSelect={(i) => setTab(totals[i].key === activeTab.key ? 0 : totals[i].key)}
               />
             </Card>
 
